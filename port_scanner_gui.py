@@ -7,29 +7,39 @@ import time
 import csv
 import json
 
+# =====================
+# 設定
+# =====================
 MAX_THREADS = 50
+TIMEOUT = 0.3
 
-stop_event = threading.Event()
+# =====================
+# グローバル状態
+# =====================
 queue = Queue()
+stop_event = threading.Event()
+scan_done = False
+scan_done_lock = threading.Lock()
 
 open_ports = []
 checked_ports = 0
 total_ports = 0
 start_time = 0
 
-# ---------- ネットワーク検出 ----------
-
-def detect_local_network():
+# =====================
+# ネットワーク自動検出
+# =====================
+def detect_local_ip():
     hostname = socket.gethostname()
-    local_ip = socket.gethostbyname(hostname)
-    base = ".".join(local_ip.split(".")[:3])
-    return base, local_ip
+    return socket.gethostbyname(hostname)
 
-# ---------- スキャン制御 ----------
-
+# =====================
+# スキャン開始
+# =====================
 def start_scan():
-    global checked_ports, total_ports, start_time, open_ports
+    global checked_ports, total_ports, start_time, open_ports, scan_done
 
+    scan_done = False
     stop_event.clear()
     open_ports = []
     checked_ports = 0
@@ -52,6 +62,9 @@ def start_scan():
 
     print(f"{target} の {start_port}〜{end_port} 番ポートをスキャンします。")
 
+    while not queue.empty():
+        queue.get()
+
     for port in range(start_port, end_port + 1):
         queue.put((target, port))
 
@@ -60,18 +73,24 @@ def start_scan():
 
     update_timer()
 
+# =====================
+# ワーカー
+# =====================
 def worker():
-    global checked_ports
+    global checked_ports, scan_done
 
-    while not queue.empty():
+    while True:
         if stop_event.is_set():
             return
 
-        target, port = queue.get()
+        try:
+            target, port = queue.get_nowait()
+        except:
+            break
 
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(0.3)
+            sock.settimeout(TIMEOUT)
             if sock.connect_ex((target, port)) == 0:
                 open_ports.append(port)
                 print(f"OPEN : {port}")
@@ -84,16 +103,26 @@ def worker():
         root.after(0, update_progress)
         queue.task_done()
 
-    if checked_ports == total_ports:
-        root.after(0, scan_finished)
+    # 完了判定（必ず1回）
+    with scan_done_lock:
+        if not scan_done and checked_ports == total_ports:
+            scan_done = True
+            root.after(0, scan_finished)
 
+# =====================
+# 中断
+# =====================
 def stop_scan():
     stop_event.set()
     status_var.set("スキャン中断")
     scan_button.config(state=tk.NORMAL)
     stop_button.config(state=tk.DISABLED)
     append_text("スキャン中断\n")
+    print("スキャン中断")
 
+# =====================
+# 完了処理
+# =====================
 def scan_finished():
     status_var.set("スキャン完了")
     scan_button.config(state=tk.NORMAL)
@@ -101,8 +130,9 @@ def scan_finished():
     append_text("スキャン完了\n")
     print("スキャン完了")
 
-# ---------- UI更新 ----------
-
+# =====================
+# UI更新
+# =====================
 def update_progress():
     progress_var.set(f"{checked_ports} / {total_ports}")
 
@@ -115,16 +145,17 @@ def update_timer():
 def append_text(text):
     result_box.insert(tk.END, text)
 
-# ---------- 保存 ----------
-
+# =====================
+# 保存
+# =====================
 def save_csv():
     path = filedialog.asksaveasfilename(defaultextension=".csv")
     if not path:
         return
     with open(path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["port"])
-        for p in open_ports:
+        writer.writerow(["open_port"])
+        for p in sorted(open_ports):
             writer.writerow([p])
 
 def save_json():
@@ -132,14 +163,22 @@ def save_json():
     if not path:
         return
     with open(path, "w") as f:
-        json.dump({"open_ports": open_ports}, f, indent=2)
+        json.dump(
+            {
+                "target": target_entry.get(),
+                "open_ports": sorted(open_ports)
+            },
+            f,
+            indent=2
+        )
 
-# ---------- GUI ----------
-
+# =====================
+# GUI
+# =====================
 root = tk.Tk()
 root.title("Advanced Port Scanner")
 
-base_net, local_ip = detect_local_network()
+local_ip = detect_local_ip()
 
 tk.Label(root, text=f"ローカルIP: {local_ip}").pack()
 tk.Label(root, text="ターゲット IP / ドメイン").pack()
